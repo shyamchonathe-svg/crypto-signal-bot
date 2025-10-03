@@ -6,10 +6,33 @@ from datetime import datetime
 import requests
 from typing import List, Dict
 import logging
+from threading import Thread
+from flask import Flask
 
 # Setup logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
+
+# Flask app for keeping Render awake
+app = Flask(__name__)
+
+@app.route('/')
+def home():
+    return "🚀 Crypto Signal Bot is running!"
+
+@app.route('/health')
+def health():
+    return {"status": "healthy", "timestamp": datetime.now().isoformat()}
+
+@app.route('/status')
+def status():
+    return {
+        "bot": "Crypto Signal Bot",
+        "status": "running",
+        "timeframe": os.getenv('TIMEFRAME', '1h'),
+        "monitoring": "Top 5 coins by volume",
+        "signal_type": "EMA(10) x EMA(20) crossovers"
+    }
 
 class CryptoSignalBot:
     def __init__(self):
@@ -237,6 +260,18 @@ class CryptoSignalBot:
                 self.send_telegram_message(f"⚠️ Error occurred: {str(e)}")
                 time.sleep(60)  # Wait 1 minute before retrying
 
-if __name__ == "__main__":
+def run_bot():
+    """Run the bot in a separate thread"""
     bot = CryptoSignalBot()
     bot.run()
+
+if __name__ == "__main__":
+    # Start bot in background thread
+    logger.info("Starting bot in background thread...")
+    bot_thread = Thread(target=run_bot, daemon=True)
+    bot_thread.start()
+    
+    # Start Flask web server (keeps Render awake)
+    port = int(os.getenv('PORT', 10000))
+    logger.info(f"Starting Flask server on port {port}...")
+    app.run(host='0.0.0.0', port=port)
