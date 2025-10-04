@@ -29,6 +29,7 @@ def status():
     return {
         "bot": "Crypto Signal Bot",
         "status": "running",
+        "exchange": "Coinbase",
         "timeframe": os.getenv('TIMEFRAME', '1h'),
         "monitoring": "Top 5 coins by volume",
         "signal_type": "EMA(10) x EMA(20) crossovers"
@@ -41,19 +42,16 @@ class CryptoSignalBot:
         self.telegram_chat_id = os.getenv('TELEGRAM_CHAT_ID')
         self.timeframe = os.getenv('TIMEFRAME', '1h')
         
-        # Initialize Binance for SPOT market only
-        self.binance = ccxt.binance({
+        # Initialize Coinbase (no auth needed for public data)
+        self.exchange = ccxt.coinbase({
             'enableRateLimit': True,
-            'rateLimit': 2000,
-            'options': {
-                'defaultType': 'spot'  # Force spot market
-            }
+            'rateLimit': 1000
         })
         
         # Track last signals
         self.last_signals = {}
         
-        logger.info("Bot initialized with SPOT market")
+        logger.info("Bot initialized with Coinbase exchange")
     
     def send_telegram_message(self, message: str):
         """Send message via Telegram Bot"""
@@ -73,42 +71,46 @@ class CryptoSignalBot:
             logger.error(f"Error sending Telegram message: {e}")
     
     def get_top_coins_by_volume(self, limit: int = 5) -> List[str]:
-        """Get top coins by 24h trading volume from SPOT market"""
+        """Get top coins by 24h trading volume from Coinbase"""
         try:
-            logger.info("Fetching spot market tickers...")
-            tickers = self.binance.fetch_tickers()
+            logger.info("Fetching Coinbase tickers...")
+            tickers = self.exchange.fetch_tickers()
             
-            # Filter USDT spot pairs
-            usdt_pairs = {}
+            # Filter USD pairs (Coinbase uses USD, not USDT)
+            usd_pairs = {}
             for symbol, ticker in tickers.items():
-                if '/USDT' in symbol and ':USDT' not in symbol:
-                    volume = ticker.get('quoteVolume', 0)
-                    if volume and float(volume) > 0:
-                        usdt_pairs[symbol] = ticker
+                if '/USD' in symbol and ticker.get('quoteVolume'):
+                    try:
+                        volume = float(ticker['quoteVolume'])
+                        if volume > 0:
+                            usd_pairs[symbol] = ticker
+                    except (ValueError, TypeError):
+                        continue
             
             # Sort by volume
             sorted_pairs = sorted(
-                usdt_pairs.items(),
+                usd_pairs.items(),
                 key=lambda x: float(x[1].get('quoteVolume', 0)),
                 reverse=True
             )
             
             top_coins = [pair[0] for pair in sorted_pairs[:limit]]
-            logger.info(f"Top {limit} SPOT coins by volume: {top_coins}")
+            logger.info(f"Top {limit} coins by volume (Coinbase): {top_coins}")
             return top_coins
             
         except Exception as e:
             logger.error(f"Error fetching top coins: {e}")
-            return ['BTC/USDT', 'ETH/USDT', 'BNB/USDT', 'SOL/USDT', 'XRP/USDT']
+            # Fallback to major pairs
+            return ['BTC/USD', 'ETH/USD', 'SOL/USD', 'XRP/USD', 'AVAX/USD']
     
     def calculate_ema(self, data: pd.Series, period: int) -> pd.Series:
         """Calculate Exponential Moving Average"""
         return data.ewm(span=period, adjust=False).mean()
     
     def fetch_ohlcv_data(self, symbol: str, timeframe: str, limit: int = 100) -> pd.DataFrame:
-        """Fetch OHLCV data from SPOT market"""
+        """Fetch OHLCV data from Coinbase"""
         try:
-            ohlcv = self.binance.fetch_ohlcv(symbol, timeframe, limit=limit)
+            ohlcv = self.exchange.fetch_ohlcv(symbol, timeframe, limit=limit)
             df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
             df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
             return df
@@ -163,11 +165,12 @@ class CryptoSignalBot:
 {emoji} <b>{signal['type']} CROSSOVER DETECTED</b> {emoji}
 
 📊 <b>Symbol:</b> {signal['symbol']}
-💰 <b>Price:</b> ${signal['price']:.4f}
-📈 <b>EMA(10):</b> {signal['ema_10']:.4f}
-📉 <b>EMA(20):</b> {signal['ema_20']:.4f}
+💰 <b>Price:</b> ${signal['price']:.2f}
+📈 <b>EMA(10):</b> {signal['ema_10']:.2f}
+📉 <b>EMA(20):</b> {signal['ema_20']:.2f}
 ⏰ <b>Time:</b> {signal['timestamp'].strftime('%Y-%m-%d %H:%M:%S')}
 ⏱️ <b>Timeframe:</b> {self.timeframe}
+🏦 <b>Exchange:</b> Coinbase
 """
         return message.strip()
     
@@ -200,8 +203,8 @@ class CryptoSignalBot:
                             self.last_signals[signal_key] = current_time
                             logger.info(f"New signal detected: {signal}")
                 
-                # Rate limiting - 1 second between requests
-                time.sleep(1)
+                # Rate limiting
+                time.sleep(1.5)
                 
             except Exception as e:
                 logger.error(f"Error processing {symbol}: {e}")
@@ -218,7 +221,7 @@ class CryptoSignalBot:
     def run(self):
         """Main loop"""
         logger.info("Starting Crypto Signal Bot...")
-        self.send_telegram_message(f"🚀 <b>Crypto Signal Bot Started!</b>\n\n⏱️ Timeframe: {self.timeframe}\n📊 Monitoring top 5 SPOT coins\n📈 EMA(10) x EMA(20) crossovers")
+        self.send_telegram_message(f"🚀 <b>Crypto Signal Bot Started!</b>\n\n🏦 <b>Exchange:</b> Coinbase\n⏱️ <b>Timeframe:</b> {self.timeframe}\n📊 <b>Monitoring:</b> Top 5 coins by volume\n📈 <b>Signal:</b> EMA(10) x EMA(20) crossovers")
         
         while True:
             try:
