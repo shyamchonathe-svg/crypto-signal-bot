@@ -43,8 +43,15 @@ class CryptoSignalBot:
         self.delta_api_secret = os.getenv('DELTA_API_SECRET')
         self.timeframe = os.getenv('TIMEFRAME', '1h')  # Default 1 hour
         
-        # Initialize exchanges
-        self.binance = ccxt.binance({'enableRateLimit': True})
+        # Initialize exchanges - use spot market with rate limiting
+        self.binance = ccxt.binance({
+            'enableRateLimit': True,
+            'options': {
+                'defaultType': 'spot',  # Use spot market, not futures
+                'adjustForTimeDifference': True
+            },
+            'rateLimit': 2000  # Increase delay between requests
+        })
         self.delta_exchange = None
         self.setup_delta_exchange()
         
