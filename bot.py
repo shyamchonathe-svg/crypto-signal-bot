@@ -36,52 +36,24 @@ def status():
 
 class CryptoSignalBot:
     def __init__(self):
-        # Environment variables (set these in your hosting platform)
+        # Environment variables
         self.telegram_bot_token = os.getenv('TELEGRAM_BOT_TOKEN')
         self.telegram_chat_id = os.getenv('TELEGRAM_CHAT_ID')
-        self.delta_api_key = os.getenv('DELTA_API_KEY')
-        self.delta_api_secret = os.getenv('DELTA_API_SECRET')
-        self.timeframe = os.getenv('TIMEFRAME', '1h')  # Default 1 hour
+        self.timeframe = os.getenv('TIMEFRAME', '1h')
         
-        # Initialize exchanges - use spot market with rate limiting
+        # Initialize Binance for SPOT market only
         self.binance = ccxt.binance({
             'enableRateLimit': True,
+            'rateLimit': 2000,
             'options': {
-                'defaultType': 'spot',  # Use spot market, not futures
-                'adjustForTimeDifference': True
-            },
-            'rateLimit': 2000  # Increase delay between requests
+                'defaultType': 'spot'  # Force spot market
+            }
         })
-        self.delta_exchange = None
-        self.setup_delta_exchange()
         
-        # Track last signals to avoid duplicates
+        # Track last signals
         self.last_signals = {}
         
-    def setup_delta_exchange(self):
-        """Setup Delta Exchange with authentication"""
-        try:
-            if self.delta_api_key and self.delta_api_secret:
-                self.delta_exchange = ccxt.delta({
-                    'apiKey': self.delta_api_key,
-                    'secret': self.delta_api_secret,
-                    'enableRateLimit': True
-                })
-                # Test authentication
-                balance = self.delta_exchange.fetch_balance()
-                logger.info("Delta Exchange authenticated successfully")
-                self.send_telegram_message("✅ Delta Exchange connected successfully!")
-            else:
-                logger.warning("Delta Exchange credentials not provided")
-        except Exception as e:
-            logger.error(f"Delta Exchange authentication failed: {e}")
-            self.send_telegram_message(f"⚠️ Delta Exchange auth failed: {str(e)}")
-            self.delta_exchange = None
-    
-    def retry_delta_authentication(self):
-        """Retry Delta Exchange authentication"""
-        logger.info("Retrying Delta Exchange authentication...")
-        self.setup_delta_exchange()
+        logger.info("Bot initialized with SPOT market")
     
     def send_telegram_message(self, message: str):
         """Send message via Telegram Bot"""
@@ -101,12 +73,20 @@ class CryptoSignalBot:
             logger.error(f"Error sending Telegram message: {e}")
     
     def get_top_coins_by_volume(self, limit: int = 5) -> List[str]:
-        """Get top coins by 24h trading volume"""
+        """Get top coins by 24h trading volume from SPOT market"""
         try:
+            logger.info("Fetching spot market tickers...")
             tickers = self.binance.fetch_tickers()
-            usdt_pairs = {k: v for k, v in tickers.items() if '/USDT' in k and ':USDT' not in k}
             
-            # Sort by quote volume (volume in USDT)
+            # Filter USDT spot pairs
+            usdt_pairs = {}
+            for symbol, ticker in tickers.items():
+                if '/USDT' in symbol and ':USDT' not in symbol:
+                    volume = ticker.get('quoteVolume', 0)
+                    if volume and float(volume) > 0:
+                        usdt_pairs[symbol] = ticker
+            
+            # Sort by volume
             sorted_pairs = sorted(
                 usdt_pairs.items(),
                 key=lambda x: float(x[1].get('quoteVolume', 0)),
@@ -114,8 +94,9 @@ class CryptoSignalBot:
             )
             
             top_coins = [pair[0] for pair in sorted_pairs[:limit]]
-            logger.info(f"Top {limit} coins by volume: {top_coins}")
+            logger.info(f"Top {limit} SPOT coins by volume: {top_coins}")
             return top_coins
+            
         except Exception as e:
             logger.error(f"Error fetching top coins: {e}")
             return ['BTC/USDT', 'ETH/USDT', 'BNB/USDT', 'SOL/USDT', 'XRP/USDT']
@@ -125,7 +106,7 @@ class CryptoSignalBot:
         return data.ewm(span=period, adjust=False).mean()
     
     def fetch_ohlcv_data(self, symbol: str, timeframe: str, limit: int = 100) -> pd.DataFrame:
-        """Fetch OHLCV data from exchange"""
+        """Fetch OHLCV data from SPOT market"""
         try:
             ohlcv = self.binance.fetch_ohlcv(symbol, timeframe, limit=limit)
             df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
@@ -144,13 +125,13 @@ class CryptoSignalBot:
         df['ema_10'] = self.calculate_ema(df['close'], 10)
         df['ema_20'] = self.calculate_ema(df['close'], 20)
         
-        # Get last two rows for crossover detection
+        # Get last two rows
         current = df.iloc[-1]
         previous = df.iloc[-2]
         
         signal = None
         
-        # Bullish crossover: EMA10 crosses above EMA20
+        # Bullish crossover
         if previous['ema_10'] <= previous['ema_20'] and current['ema_10'] > current['ema_20']:
             signal = {
                 'type': 'BULLISH',
@@ -161,7 +142,7 @@ class CryptoSignalBot:
                 'timestamp': current['timestamp']
             }
         
-        # Bearish crossover: EMA10 crosses below EMA20
+        # Bearish crossover
         elif previous['ema_10'] >= previous['ema_20'] and current['ema_10'] < current['ema_20']:
             signal = {
                 'type': 'BEARISH',
@@ -209,18 +190,18 @@ class CryptoSignalBot:
                     signal = self.detect_crossover(symbol, df)
                     
                     if signal:
-                        # Check if this is a new signal (not sent in last 2 hours)
+                        # Check if new signal
                         signal_key = f"{symbol}_{signal['type']}"
                         current_time = time.time()
                         
                         if signal_key not in self.last_signals or \
-                           (current_time - self.last_signals[signal_key]) > 7200:  # 2 hours
+                           (current_time - self.last_signals[signal_key]) > 7200:
                             signals_found.append(signal)
                             self.last_signals[signal_key] = current_time
                             logger.info(f"New signal detected: {signal}")
                 
-                # Rate limiting
-                time.sleep(0.5)
+                # Rate limiting - 1 second between requests
+                time.sleep(1)
                 
             except Exception as e:
                 logger.error(f"Error processing {symbol}: {e}")
@@ -237,24 +218,14 @@ class CryptoSignalBot:
     def run(self):
         """Main loop"""
         logger.info("Starting Crypto Signal Bot...")
-        self.send_telegram_message(f"🚀 <b>Crypto Signal Bot Started!</b>\n\n⏱️ Timeframe: {self.timeframe}\n📊 Monitoring top 5 coins by volume\n📈 EMA(10) x EMA(20) crossovers")
-        
-        # Counter for Delta auth retry (every 24 hours)
-        auth_retry_counter = 0
-        auth_retry_interval = 288  # 24 hours / 5 minutes
+        self.send_telegram_message(f"🚀 <b>Crypto Signal Bot Started!</b>\n\n⏱️ Timeframe: {self.timeframe}\n📊 Monitoring top 5 SPOT coins\n📈 EMA(10) x EMA(20) crossovers")
         
         while True:
             try:
                 # Check signals
                 self.check_signals()
                 
-                # Retry Delta authentication periodically
-                auth_retry_counter += 1
-                if auth_retry_counter >= auth_retry_interval:
-                    self.retry_delta_authentication()
-                    auth_retry_counter = 0
-                
-                # Wait for next check (5 minutes)
+                # Wait 5 minutes
                 logger.info("Waiting 5 minutes before next check...")
                 time.sleep(300)
                 
@@ -265,7 +236,7 @@ class CryptoSignalBot:
             except Exception as e:
                 logger.error(f"Error in main loop: {e}")
                 self.send_telegram_message(f"⚠️ Error occurred: {str(e)}")
-                time.sleep(60)  # Wait 1 minute before retrying
+                time.sleep(60)
 
 def run_bot():
     """Run the bot in a separate thread"""
@@ -278,7 +249,7 @@ if __name__ == "__main__":
     bot_thread = Thread(target=run_bot, daemon=True)
     bot_thread.start()
     
-    # Start Flask web server (keeps Render awake)
+    # Start Flask web server
     port = int(os.getenv('PORT', 10000))
     logger.info(f"Starting Flask server on port {port}...")
     app.run(host='0.0.0.0', port=port)
